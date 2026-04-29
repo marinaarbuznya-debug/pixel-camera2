@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "110496638940",
+    "project_id": "pixel-camera-68074",
+    "storage_bucket": "pixel-camera-68074.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:110496638940:android:b06bf85700087107005119",
+        "android_client_info": {
+          "package_name": "com.pixel.camera"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPCQr0PfVakE1nIy5PF6Sn-2XhXPIVENQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

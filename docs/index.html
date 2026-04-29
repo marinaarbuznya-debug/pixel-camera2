@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Камера</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #e0e0e0; font-family: monospace; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 20px; }
+  h1 { font-size: 13px; letter-spacing: 4px; text-transform: uppercase; color: #444; }
+  #video-container { width: 100%; max-width: 640px; background: #111; border-radius: 4px; overflow: hidden; position: relative; aspect-ratio: 4/3; }
+  video { width: 100%; height: 100%; object-fit: cover; }
+  #status-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #666; font-size: 12px; letter-spacing: 2px; }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  button { font-family: monospace; font-size: 11px; letter-spacing: 3px; text-transform: uppercase; padding: 14px 24px; border: 1px solid; border-radius: 2px; cursor: pointer; background: transparent; transition: all 0.2s; }
+  #btnConnect { border-color: #4caf50; color: #4caf50; }
+  #btnConnect:hover { background: #4caf50; color: #000; }
+  #btnTorchOn { border-color: #FFD700; color: #FFD700; }
+  #btnTorchOn:hover { background: #FFD700; color: #000; }
+  #btnTorchOff { border-color: #444; color: #444; }
+  #btnTorchOff:hover { background: #444; color: #fff; }
+  button:disabled { opacity: 0.3; cursor: not-allowed; }
+  #statusText { font-size: 11px; letter-spacing: 2px; color: #444; min-height: 20px; text-align: center; }
+  #statusText.ok { color: #4caf50; }
+  #statusText.err { color: #f44336; }
+  #statusText.loading { color: #FFD700; }
+</style>
+</head>
+<body>
+
+<h1>Камера спостереження</h1>
+
+<div id="video-container">
+  <video id="remoteVideo" autoplay playsinline muted></video>
+  <div id="status-overlay">ОЧІКУВАННЯ З'ЄДНАННЯ</div>
+</div>
+
+<div class="controls">
+  <button id="btnConnect" onclick="connect()">Підключити</button>
+  <button id="btnTorchOn" onclick="torch('torch_on')" disabled>Підсвітка ВКЛ</button>
+  <button id="btnTorchOff" onclick="torch('torch_off')" disabled>Підсвітка ВИКЛ</button>
+</div>
+
+<div id="statusText">готово</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+
+<script>
+// ===== НАЛАШТУВАННЯ — ЗАМІНИТИ СВОЇМИ =====
+const FIREBASE_CONFIG = {
+  apiKey: "ТВІЙ_API_KEY",
+  authDomain: "pixel-camera.firebaseapp.com",
+  databaseURL: "ТВІЙ_DB_URL",
+  projectId: "pixel-camera",
+  storageBucket: "pixel-camera.appspot.com",
+  messagingSenderId: "ТВІЙ_SENDER_ID",
+  appId: "ТВІЙ_APP_ID"
+};
+// ==========================================
+
+firebase.initializeApp(FIREBASE_CONFIG);
+const db = firebase.database();
+
+let pc = null;
+
+function setStatus(msg, type='') {
+  const el = document.getElementById('statusText');
+  el.textContent = msg;
+  el.className = type;
+}
+
+async function connect() {
+  document.getElementById('btnConnect').disabled = true;
+  setStatus('підключаюсь...', 'loading');
+  document.getElementById('status-overlay').textContent = 'ПІДКЛЮЧЕННЯ...';
+
+  try {
+    const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    pc = new RTCPeerConnection({ iceServers });
+
+    pc.ontrack = (event) => {
+      const video = document.getElementById('remoteVideo');
+      if (event.streams && event.streams[0]) {
+        video.srcObject = event.streams[0];
+        document.getElementById('status-overlay').style.display = 'none';
+        document.getElementById('btnTorchOn').disabled = false;
+        document.getElementById('btnTorchOff').disabled = false;
+        setStatus('✓ підключено', 'ok');
+      }
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        db.ref('candidate_viewer').set(
+          event.candidate.candidate + '||' + event.candidate.sdpMid + '||' + event.candidate.sdpMLineIndex
+        );
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        setStatus('з\'єднання перервано', 'err');
+        document.getElementById('btnConnect').disabled = false;
+        document.getElementById('btnTorchOn').disabled = true;
+        document.getElementById('btnTorchOff').disabled = true;
+        document.getElementById('status-overlay').style.display = 'flex';
+        document.getElementById('status-overlay').textContent = 'З\'ЄДНАННЯ ПЕРЕРВАНО';
+      }
+    };
+
+    // Створити offer
+    const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: true });
+    await pc.setLocalDescription(offer);
+    db.ref('offer').set(offer.sdp);
+
+    // Слухати answer від пристрою
+    db.ref('answer').on('value', async (snapshot) => {
+      const answerSdp = snapshot.val();
+      if (answerSdp && pc.remoteDescription === null) {
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+      }
+    });
+
+    // Слухати ICE кандидатів від пристрою
+    db.ref('candidate_device').on('value', async (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const parts = data.split('||');
+        if (parts.length === 3) {
+          try {
+            await pc.addIceCandidate({ candidate: parts[0], sdpMid: parts[1], sdpMLineIndex: parseInt(parts[2]) });
+          } catch(e) {}
+        }
+      }
+    });
+
+  } catch(e) {
+    setStatus('помилка: ' + e.message, 'err');
+    document.getElementById('btnConnect').disabled = false;
+  }
+}
+
+async function torch(command) {
+  db.ref('command').set(command);
+  setStatus(command === 'torch_on' ? '✓ підсвітка увімкнена' : '✓ підсвітка вимкнена', 'ok');
+}
+</script>
+</body>
+</html>
