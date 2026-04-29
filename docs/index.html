@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Камера</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #e0e0e0; font-family: monospace; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 20px; }
+  h1 { font-size: 13px; letter-spacing: 4px; text-transform: uppercase; color: #444; }
+  #video-container { width: 100%; max-width: 640px; background: #111; border-radius: 4px; overflow: hidden; position: relative; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; }
+  #videoImg { width: 100%; height: 100%; object-fit: cover; display: none; }
+  #overlay { position: absolute; text-align: center; color: #555; font-size: 11px; letter-spacing: 2px; }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  button { font-family: monospace; font-size: 11px; letter-spacing: 3px; text-transform: uppercase; padding: 14px 24px; border: 1px solid; border-radius: 2px; cursor: pointer; background: transparent; transition: all 0.2s; }
+  #btnConnect { border-color: #4caf50; color: #4caf50; }
+  #btnConnect:hover:not(:disabled) { background: #4caf50; color: #000; }
+  #btnTorchOn { border-color: #FFD700; color: #FFD700; }
+  #btnTorchOn:hover:not(:disabled) { background: #FFD700; color: #000; }
+  #btnTorchOff { border-color: #444; color: #444; }
+  #btnTorchOff:hover:not(:disabled) { background: #444; color: #fff; }
+  button:disabled { opacity: 0.3; cursor: not-allowed; }
+  #statusText { font-size: 11px; letter-spacing: 2px; color: #444; min-height: 20px; text-align: center; }
+  #statusText.ok { color: #4caf50; }
+  #statusText.err { color: #f44336; }
+  #statusText.loading { color: #FFD700; }
+  #urlInfo { font-size: 10px; color: #333; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Камера спостереження</h1>
+
+<div id="video-container">
+  <img id="videoImg" alt="stream" />
+  <div id="overlay">ОЧІКУВАННЯ З'ЄДНАННЯ</div>
+</div>
+
+<div class="controls">
+  <button id="btnConnect" onclick="connect()">Підключити</button>
+  <button id="btnTorchOn" onclick="torch('torch_on')" disabled>Підсвітка ВКЛ</button>
+  <button id="btnTorchOff" onclick="torch('torch_off')" disabled>Підсвітка ВИКЛ</button>
+</div>
+
+<div id="statusText">готово</div>
+<div id="urlInfo"></div>
+
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+
+<script>
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyANFsTpDckuJ4FQuL76Wuk3sqf3Ty-pmro",
+  authDomain: "pixel-camera-68074.firebaseapp.com",
+  databaseURL: "https://pixel-camera-68074-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "pixel-camera-68074",
+  storageBucket: "pixel-camera-68074.firebasestorage.app",
+  messagingSenderId: "110496638940",
+  appId: "1:110496638940:web:d47e627192e8ef66005119"
+};
+
+firebase.initializeApp(FIREBASE_CONFIG);
+const db = firebase.database();
+
+function setStatus(msg, type='') {
+  const el = document.getElementById('statusText');
+  el.textContent = msg;
+  el.className = type;
+}
+
+function connect() {
+  document.getElementById('btnConnect').disabled = true;
+  setStatus('отримую адресу камери...', 'loading');
+
+  db.ref('stream_url').once('value', (snapshot) => {
+    const url = snapshot.val();
+    if (!url) {
+      setStatus('камера недоступна — відкрий додаток на телефоні', 'err');
+      document.getElementById('btnConnect').disabled = false;
+      return;
+    }
+
+    document.getElementById('urlInfo').textContent = url;
+    setStatus('підключаюсь до камери...', 'loading');
+
+    const img = document.getElementById('videoImg');
+    img.onload = () => {
+      document.getElementById('overlay').style.display = 'none';
+      img.style.display = 'block';
+      setStatus('✓ підключено', 'ok');
+      document.getElementById('btnTorchOn').disabled = false;
+      document.getElementById('btnTorchOff').disabled = false;
+    };
+    img.onerror = () => {
+      setStatus('не вдалось підключитись — перевір мережу', 'err');
+      document.getElementById('btnConnect').disabled = false;
+    };
+    img.src = url;
+  });
+}
+
+function torch(command) {
+  db.ref('command').set(command);
+  setStatus(command === 'torch_on' ? '✓ підсвітка увімкнена' : '✓ підсвітка вимкнена', 'ok');
+}
+
+// Автоматично перевіряти статус камери
+db.ref('status').on('value', (snapshot) => {
+  const status = snapshot.val();
+  if (status === 'online') {
+    document.getElementById('overlay').textContent = 'КАМЕРА ОНЛАЙН — НАТИСНИ ПІДКЛЮЧИТИ';
+  } else if (status === 'offline') {
+    document.getElementById('overlay').textContent = 'КАМЕРА ОФЛАЙН';
+    document.getElementById('overlay').style.display = 'flex';
+  }
+});
+</script>
+</body>
+</html>
