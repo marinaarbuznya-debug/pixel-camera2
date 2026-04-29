@@ -14,9 +14,9 @@ import android.util.Log;
 import android.util.Size;
 import androidx.core.app.NotificationCompat;
 
-import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.database.DataSnapshot;
 import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.database.ValueEventListener;
 
 import java.io.*;
@@ -30,6 +30,7 @@ public class CameraStreamService extends Service {
     private static final String TAG = "CameraStream";
     private static final String CHANNEL_ID = "camera_channel";
     private static final int PORT = 8080;
+    private static final String NGROK_TOKEN = "3D2OHFSqDV1u68nVGjWkUb6XueR_5Mvr5X8JMp2b8JSGDvRZX";
 
     private CameraManager cameraManager;
     private CameraDevice cameraDevice;
@@ -71,7 +72,7 @@ public class CameraStreamService extends Service {
                     URL url = new URL("https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm64.tgz");
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setConnectTimeout(30000);
-                    conn.setReadTimeout(30000);
+                    conn.setReadTimeout(60000);
 
                     File tgzFile = new File(getFilesDir(), "ngrok.tgz");
                     try (InputStream in = conn.getInputStream();
@@ -81,7 +82,6 @@ public class CameraStreamService extends Service {
                         while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
                     }
 
-                    // Розпакувати через tar
                     Process tar = Runtime.getRuntime().exec(
                         new String[]{"tar", "-xf", tgzFile.getAbsolutePath(), "-C", getFilesDir().getAbsolutePath()}
                     );
@@ -90,8 +90,15 @@ public class CameraStreamService extends Service {
                     ngrokFile.setExecutable(true);
                 }
 
-                // Запустити ngrok
-                Log.d(TAG, "Starting ngrok...");
+                // Додати токен
+                Log.d(TAG, "Adding ngrok token...");
+                Process authProcess = Runtime.getRuntime().exec(
+                    new String[]{ngrokFile.getAbsolutePath(), "config", "add-authtoken", NGROK_TOKEN}
+                );
+                authProcess.waitFor();
+
+                // Запустити тунель
+                Log.d(TAG, "Starting ngrok tunnel...");
                 ngrokProcess = Runtime.getRuntime().exec(
                     new String[]{ngrokFile.getAbsolutePath(), "http", String.valueOf(PORT), "--log=stdout"}
                 );
@@ -106,7 +113,8 @@ public class CameraStreamService extends Service {
                         String ngrokUrl = line.substring(idx + 4).trim();
                         if (ngrokUrl.contains(" ")) ngrokUrl = ngrokUrl.substring(0, ngrokUrl.indexOf(" "));
                         Log.d(TAG, "Got URL: " + ngrokUrl);
-                        FirebaseDatabase.getInstance().getReference("stream_url").setValue(ngrokUrl);
+                        final String finalUrl = ngrokUrl;
+                        FirebaseDatabase.getInstance().getReference("stream_url").setValue(finalUrl);
                         FirebaseDatabase.getInstance().getReference("status").setValue("online");
                         break;
                     }
@@ -114,7 +122,6 @@ public class CameraStreamService extends Service {
 
             } catch (Exception e) {
                 Log.e(TAG, "Ngrok error: " + e.getMessage());
-                // Fallback до локального IP
                 getLocalIpUrl();
             }
         }).start();
@@ -248,7 +255,6 @@ public class CameraStreamService extends Service {
                 out.flush();
 
                 clients.add(out);
-
                 if (lastFrame != null) sendFrame(out, lastFrame);
 
             } catch (Exception e) {
