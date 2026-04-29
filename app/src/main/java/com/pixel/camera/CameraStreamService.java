@@ -14,9 +14,9 @@ import android.util.Log;
 import android.util.Size;
 import androidx.core.app.NotificationCompat;
 
+import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.database.DataSnapshot;
 import com.google.firebase.database.DatabaseError;
-import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.database.ValueEventListener;
 
 import java.io.*;
@@ -41,25 +41,103 @@ public class CameraStreamService extends Service {
     private final List<OutputStream> clients = new CopyOnWriteArrayList<>();
     private volatile byte[] lastFrame;
     private String cameraId;
-    private boolean torchOn = false;
+    private Process ngrokProcess;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
         startForeground(2, buildNotification());
-
         startBackgroundThread();
         startHttpServer();
         openCamera();
+        downloadAndStartNgrok();
         listenForCommands();
-        updateServerUrl();
     }
 
     private void startBackgroundThread() {
         backgroundThread = new HandlerThread("CameraBackground");
         backgroundThread.start();
         backgroundHandler = new Handler(backgroundThread.getLooper());
+    }
+
+    private void downloadAndStartNgrok() {
+        new Thread(() -> {
+            try {
+                File ngrokFile = new File(getFilesDir(), "ngrok");
+
+                if (!ngrokFile.exists()) {
+                    Log.d(TAG, "Downloading ngrok...");
+                    URL url = new URL("https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-arm64.tgz");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setConnectTimeout(30000);
+                    conn.setReadTimeout(30000);
+
+                    File tgzFile = new File(getFilesDir(), "ngrok.tgz");
+                    try (InputStream in = conn.getInputStream();
+                         FileOutputStream out = new FileOutputStream(tgzFile)) {
+                        byte[] buf = new byte[4096];
+                        int n;
+                        while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                    }
+
+                    // Розпакувати через tar
+                    Process tar = Runtime.getRuntime().exec(
+                        new String[]{"tar", "-xf", tgzFile.getAbsolutePath(), "-C", getFilesDir().getAbsolutePath()}
+                    );
+                    tar.waitFor();
+                    tgzFile.delete();
+                    ngrokFile.setExecutable(true);
+                }
+
+                // Запустити ngrok
+                Log.d(TAG, "Starting ngrok...");
+                ngrokProcess = Runtime.getRuntime().exec(
+                    new String[]{ngrokFile.getAbsolutePath(), "http", String.valueOf(PORT), "--log=stdout"}
+                );
+
+                // Читати вивід і знайти URL
+                BufferedReader reader = new BufferedReader(new InputStreamReader(ngrokProcess.getInputStream()));
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    Log.d(TAG, "ngrok: " + line);
+                    if (line.contains("url=https://")) {
+                        int idx = line.indexOf("url=https://");
+                        String ngrokUrl = line.substring(idx + 4).trim();
+                        if (ngrokUrl.contains(" ")) ngrokUrl = ngrokUrl.substring(0, ngrokUrl.indexOf(" "));
+                        Log.d(TAG, "Got URL: " + ngrokUrl);
+                        FirebaseDatabase.getInstance().getReference("stream_url").setValue(ngrokUrl);
+                        FirebaseDatabase.getInstance().getReference("status").setValue("online");
+                        break;
+                    }
+                }
+
+            } catch (Exception e) {
+                Log.e(TAG, "Ngrok error: " + e.getMessage());
+                // Fallback до локального IP
+                getLocalIpUrl();
+            }
+        }).start();
+    }
+
+    private void getLocalIpUrl() {
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface iface = interfaces.nextElement();
+                Enumeration<InetAddress> addrs = iface.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress addr = addrs.nextElement();
+                    if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
+                        String url = "http://" + addr.getHostAddress() + ":" + PORT;
+                        FirebaseDatabase.getInstance().getReference("stream_url").setValue(url);
+                        FirebaseDatabase.getInstance().getReference("status").setValue("online_local");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "IP error: " + e.getMessage());
+        }
     }
 
     private void openCamera() {
@@ -70,8 +148,8 @@ public class CameraStreamService extends Service {
             StreamConfigurationMap map = cameraManager.getCameraCharacteristics(cameraId)
                 .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
 
+            Size selectedSize = new Size(640, 480);
             Size[] sizes = map.getOutputSizes(ImageFormat.JPEG);
-            Size selectedSize = sizes[sizes.length - 1]; // Найменший розмір для швидкості
             for (Size s : sizes) {
                 if (s.getWidth() <= 640 && s.getHeight() <= 480) {
                     selectedSize = s;
@@ -127,7 +205,6 @@ public class CameraStreamService extends Service {
                         captureSession = session;
                         try {
                             session.setRepeatingRequest(builder.build(), null, backgroundHandler);
-                            FirebaseDatabase.getInstance().getReference("status").setValue("online");
                         } catch (Exception e) {
                             Log.e(TAG, "Preview error: " + e.getMessage());
                         }
@@ -143,7 +220,6 @@ public class CameraStreamService extends Service {
         new Thread(() -> {
             try {
                 serverSocket = new ServerSocket(PORT);
-                Log.d(TAG, "Server started on port " + PORT);
                 while (!serverSocket.isClosed()) {
                     try {
                         Socket client = serverSocket.accept();
@@ -173,10 +249,7 @@ public class CameraStreamService extends Service {
 
                 clients.add(out);
 
-                // Надіслати останній кадр одразу
-                if (lastFrame != null) {
-                    sendFrame(out, lastFrame);
-                }
+                if (lastFrame != null) sendFrame(out, lastFrame);
 
             } catch (Exception e) {
                 Log.e(TAG, "Handle client error: " + e.getMessage());
@@ -206,42 +279,6 @@ public class CameraStreamService extends Service {
         out.flush();
     }
 
-    private void updateServerUrl() {
-        new Thread(() -> {
-            try {
-                // Отримати зовнішній IP через сервіс
-                URL url = new URL("https://api.ipify.org");
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(5000);
-                BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                String ip = br.readLine().trim();
-                br.close();
-                String streamUrl = "http://" + ip + ":" + PORT;
-                FirebaseDatabase.getInstance().getReference("stream_url").setValue(streamUrl);
-                Log.d(TAG, "Stream URL: " + streamUrl);
-            } catch (Exception e) {
-                Log.e(TAG, "IP error: " + e.getMessage());
-                // Fallback до локального IP
-                try {
-                    Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-                    while (interfaces.hasMoreElements()) {
-                        NetworkInterface iface = interfaces.nextElement();
-                        Enumeration<InetAddress> addrs = iface.getInetAddresses();
-                        while (addrs.hasMoreElements()) {
-                            InetAddress addr = addrs.nextElement();
-                            if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
-                                String streamUrl = "http://" + addr.getHostAddress() + ":" + PORT;
-                                FirebaseDatabase.getInstance().getReference("stream_url").setValue(streamUrl);
-                            }
-                        }
-                    }
-                } catch (Exception ex) {
-                    Log.e(TAG, "Local IP error: " + ex.getMessage());
-                }
-            }
-        }).start();
-    }
-
     private void listenForCommands() {
         FirebaseDatabase.getInstance().getReference("command")
             .addValueEventListener(new ValueEventListener() {
@@ -252,10 +289,8 @@ public class CameraStreamService extends Service {
                     try {
                         if ("torch_on".equals(command)) {
                             cameraManager.setTorchMode(cameraId, true);
-                            torchOn = true;
                         } else if ("torch_off".equals(command)) {
                             cameraManager.setTorchMode(cameraId, false);
-                            torchOn = false;
                         }
                     } catch (Exception e) {
                         Log.e(TAG, "Torch error: " + e.getMessage());
@@ -275,6 +310,7 @@ public class CameraStreamService extends Service {
     public void onDestroy() {
         super.onDestroy();
         try {
+            if (ngrokProcess != null) ngrokProcess.destroy();
             if (captureSession != null) captureSession.close();
             if (cameraDevice != null) cameraDevice.close();
             if (imageReader != null) imageReader.close();
